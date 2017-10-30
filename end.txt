@@ -1,0 +1,1176 @@
+diff --git a/defs.mk b/defs.mk
+index 9932652..c332e6b 100644
+--- a/defs.mk
++++ b/defs.mk
+@@ -13,7 +13,7 @@
+ # The things that can be set here are documented in mk/os161.config.mk.
+ #
+ 
+-OSTREE=/home/ubuntu/cs161/root
++OSTREE=/home/jacob/os161/root
+ PLATFORM=sys161
+ MACHINE=mips
+ COMPAT_CFLAGS= -DNEED_NTOHLL
+diff --git a/kern/arch/mips/thread/switchframe.c b/kern/arch/mips/thread/switchframe.c
+index 1a7a41b..8414797 100644
+--- a/kern/arch/mips/thread/switchframe.c
++++ b/kern/arch/mips/thread/switchframe.c
+@@ -96,3 +96,48 @@ switchframe_init(struct thread *thread,
+         /* Set ->t_context, and we're done. */
+ 	thread->t_context = sf;
+ }
++void
++my_switchframe_init(struct thread *thread,
++		 int (*entrypoint)(void *data1, unsigned long data2),
++		 void *data1, unsigned long data2)
++{
++	vaddr_t stacktop;
++	struct switchframe *sf;
++
++        /*
++         * MIPS stacks grow down. t_stack is just a hunk of memory, so
++         * get the other end of it. Then set up a switchframe on the
++         * top of the stack.
++         */
++        stacktop = ((vaddr_t)thread->t_stack) + STACK_SIZE;
++        sf = ((struct switchframe *) stacktop) - 1;
++
++        /* Zero out the switchframe. */
++        bzero(sf, sizeof(*sf));
++
++        /*
++         * Now set the important parts: pass through the three arguments,
++         * and set the return address register to the place we want
++         * execution to begin.
++         *
++         * Thus, when switchframe_switch does its "j ra", it will
++         * actually jump to mips_threadstart, which will move the
++         * arguments into the right register and jump to
++         * thread_startup().
++         *
++         * Note that this means that when we call switchframe_switch()
++         * in thread_switch(), we may not come back out the same way
++         * in the next thread. (Though we will come back out the same
++         * way when we later come back to the same thread again.)
++         *
++         * This has implications for code at the bottom of
++         * thread_switch, described in thread.c.
++         */
++        sf->sf_s0 = (uint32_t)entrypoint;
++        sf->sf_s1 = (uint32_t)data1;
++        sf->sf_s2 = (uint32_t)data2;
++        sf->sf_ra = (uint32_t)mips_threadstart;
++
++        /* Set ->t_context, and we're done. */
++	thread->t_context = sf;
++}
+diff --git a/kern/include/kern/limits.h b/kern/include/kern/limits.h
+index 8699b80..72f679c 100644
+--- a/kern/include/kern/limits.h
++++ b/kern/include/kern/limits.h
+@@ -85,7 +85,6 @@
+ /* Max bytes for atomic pipe I/O -- see description in the pipe() man page */
+ #define __PIPE_BUF      512
+ 
+-
+ /*
+  * Not so important parts of the API. (Especially in OS/161 where we
+  * don't do credentials by default.)
+diff --git a/kern/include/synch.h b/kern/include/synch.h
+index fee3b07..22d39c5 100644
+--- a/kern/include/synch.h
++++ b/kern/include/synch.h
+@@ -72,14 +72,39 @@ void V(struct semaphore *);
+  * The name field is for easier debugging. A copy of the name is
+  * (should be) made internally.
+  */
++
++//UPDATED with new implementation
+ struct lock {
++	
+         char *lk_name;
+-        // add what you need here
++        /*
++	// add what you need here
+         // (don't forget to mark things volatile as needed)
++	
++	//Central lock: spinlock
++	struct spinlock splock;
++	
++	//volatile variable to use for freeing functions
++	volatile int locked;
++	
++	//Lock Thread Container
++	//struct thread th_holder; 	//NEEDS TO BE POINTER
++	struct thread *th_holder;
++	
++	//Lock Wait Channel
++	//struct wchan l_wch; 		//pointer*****
++	struct wchan *l_wch;
++	*/
++
++	struct wchan *lk_wchan;
++	struct thread *lk_thread;
++	struct spinlock lk_spinlock;
++	volatile bool lk_busy;
++
+ };
+ 
+-struct lock *lock_create(const char *name);
+-void lock_destroy(struct lock *);
++struct lock *lock_create(const char *name); 	//Modified slightly
++void lock_destroy(struct lock *); 		//modified slightly
+ 
+ /*
+  * Operations:
+@@ -92,9 +117,9 @@ void lock_destroy(struct lock *);
+  *
+  * These operations must be atomic. You get to write them.
+  */
+-void lock_acquire(struct lock *);
+-void lock_release(struct lock *);
+-bool lock_do_i_hold(struct lock *);
++void lock_acquire(struct lock *); 	//done
++void lock_release(struct lock *); 	//done
++bool lock_do_i_hold(struct lock *); 	//done
+ 
+ 
+ /*
+@@ -115,10 +140,13 @@ struct cv {
+         char *cv_name;
+         // add what you need here
+         // (don't forget to mark things volatile as needed)
++	//struct wchan cv_wch; 		// works best as pointer for code
++	struct spinlock cv_lock;
++	struct wchan *cv_wchan;
+ };
+ 
+-struct cv *cv_create(const char *name);
+-void cv_destroy(struct cv *);
++struct cv *cv_create(const char *name); 	//Modified slightly
++void cv_destroy(struct cv *); 			//Modified slightly
+ 
+ /*
+  * Operations:
+@@ -133,9 +161,9 @@ void cv_destroy(struct cv *);
+  *
+  * These operations must be atomic. You get to write them.
+  */
+-void cv_wait(struct cv *cv, struct lock *lock);
+-void cv_signal(struct cv *cv, struct lock *lock);
+-void cv_broadcast(struct cv *cv, struct lock *lock);
++void cv_wait(struct cv *cv, struct lock *lock); 	//DONE
++void cv_signal(struct cv *cv, struct lock *lock); 	//DONE
++void cv_broadcast(struct cv *cv, struct lock *lock); 	//DONE
+ 
+ 
+ #endif /* _SYNCH_H_ */
+diff --git a/kern/include/test.h b/kern/include/test.h
+index ad3552f..f4a720a 100644
+--- a/kern/include/test.h
++++ b/kern/include/test.h
+@@ -54,6 +54,9 @@ int threadlisttest(int, char **);
+ int threadtest(int, char **);
+ int threadtest2(int, char **);
+ int threadtest3(int, char **);
++
++int threadtest4(int, char **); 		//MY thread test
++
+ int semtest(int, char **);
+ int locktest(int, char **);
+ int cvtest(int, char **);
+diff --git a/kern/include/thread.h b/kern/include/thread.h
+index d161c8f..7efd06e 100644
+--- a/kern/include/thread.h
++++ b/kern/include/thread.h
+@@ -109,6 +109,18 @@ struct thread {
+ 	bool t_did_reserve_buffers;	/* reserve_buffers() in effect */
+ 
+ 	/* add more here as needed */
++
++	//Old idea - dont want to use anymore
++	//pid_t t_pid; 			//the pid of the thread
++
++	//NEW VALUES
++	struct semaphore *semchild;
++	struct semaphore *semparent;
++	struct thread *th_parent;
++	int childs;
++	bool has_parent;
++	int th_return;
++
+ };
+ 
+ /*
+@@ -143,15 +155,27 @@ void thread_shutdown(void);
+  * general safe to refer to it as the new thread may exit and
+  * disappear at any time without notice.
+  */
++
+ int thread_fork(const char *name, struct proc *proc,
+                 void (*func)(void *, unsigned long),
+                 void *data1, unsigned long data2);
++//Or...my own version that uses threads and my function
++int my_thread_fork(const char *name, struct thread **thread_out,
++		struct proc *proc, int (*func)(void *, unsigned long),
++		void *data1, unsigned long data2);
+ 
+ /*
+  * Cause the current thread to exit.
+  * Interrupts need not be disabled.
+  */
+-__DEAD void thread_exit(void);
++void thread_exit(int ret);
++
++//Stuff I added
++
++//static struct pidinfo * pi_get(pid_t pid);
++//int thread_join(pid_t childpid, int *status, int options);
++int thread_join(struct thread *thread, int *ret);
++
+ 
+ /*
+  * Cause the current thread to yield to the next runnable thread, but
+diff --git a/kern/include/threadprivate.h b/kern/include/threadprivate.h
+index d07dd07..3d9c2bf 100644
+--- a/kern/include/threadprivate.h
++++ b/kern/include/threadprivate.h
+@@ -74,5 +74,8 @@ void switchframe_init(struct thread *,
+ 		      void (*entrypoint)(void *data1, unsigned long data2),
+ 		      void *data1, unsigned long data2);
+ 
++void my_switchframe_init(struct thread *,
++			int (*entrypoint)(void *data1, unsigned long data2),
++			void *data1, unsigned long data2);
+ 
+ #endif /* _THREADPRIVATE_H_ */
+diff --git a/kern/include/wchan.h b/kern/include/wchan.h
+index 8009598..6e34a6d 100644
+--- a/kern/include/wchan.h
++++ b/kern/include/wchan.h
+@@ -34,7 +34,6 @@
+  * Wait channel.
+  */
+ 
+-
+ struct spinlock; /* in spinlock.h */
+ struct wchan; /* Opaque */
+ 
+@@ -56,6 +55,10 @@ void wchan_destroy(struct wchan *wc);
+  */
+ bool wchan_isempty(struct wchan *wc, struct spinlock *lk);
+ 
++//ADDED FUNCTION PROTOTYPES! (Currently defined within thread.c with others)
++void wchan_lock(struct wchan *wch);
++void wchan_unlock(struct wchan *wch);
++
+ /*
+  * Go to sleep on a wait channel. The current thread is suspended
+  * until awakened by someone else, at which point this function
+diff --git a/kern/main/main.c b/kern/main/main.c
+index 34f86da..6acacf8 100644
+--- a/kern/main/main.c
++++ b/kern/main/main.c
+@@ -217,7 +217,7 @@ void
+ sys__exit(int status)
+ {
+         proc__exit(_MKWAIT_EXIT(status));
+-        thread_exit();
++        thread_exit(0);
+ }
+ 
+ 
+diff --git a/kern/main/menu.c b/kern/main/menu.c
+index 33522bb..5db281b 100644
+--- a/kern/main/menu.c
++++ b/kern/main/menu.c
+@@ -70,7 +70,7 @@
+  * it gets by passing it to vfs_open().
+  */
+ static
+-void
++int
+ cmd_progthread(void *ptr, unsigned long nargs)
+ {
+ 	char **args = ptr;
+@@ -92,10 +92,12 @@ cmd_progthread(void *ptr, unsigned long nargs)
+ 	if (result) {
+ 		kprintf("Running program %s failed: %s\n", args[0],
+ 			strerror(result));
+-		return;
++		return -1;
+ 	}
+ 
++	//MODIFIED - now returns an int to help with the thread return
+ 	/* NOTREACHED: runprogram only returns on error. */
++	return 0;
+ }
+ 
+ /*
+@@ -123,7 +125,8 @@ common_prog(int nargs, char **args)
+ 		return ENOMEM;
+ 	}
+ 
+-	result = thread_fork(args[0] /* thread name */,
++	result = my_thread_fork(args[0] /* thread name */,
++			NULL,
+ 			proc /* new process */,
+ 			cmd_progthread /* thread function */,
+ 			args /* thread arg */, nargs /* thread arg */);
+@@ -265,7 +268,7 @@ cmd_quit(int nargs, char **args)
+ 
+ 	vfs_sync();
+ 	sys_reboot(RB_POWEROFF);
+-	thread_exit();
++	thread_exit(0);
+ 	return 0;
+ }
+ 
+@@ -486,6 +489,7 @@ static const char *testmenu[] = {
+ 	"[tt1] Thread test 1                 ",
+ 	"[tt2] Thread test 2                 ",
+ 	"[tt3] Thread test 3                 ",
++	"[tt4] Thread test 4                 ", 	//MY thread test
+ #if OPT_NET
+ 	"[net] Network test                  ",
+ #endif
+@@ -595,6 +599,7 @@ static struct {
+ 	{ "tt1",	threadtest },
+ 	{ "tt2",	threadtest2 },
+ 	{ "tt3",	threadtest3 },
++	{ "tt4",	threadtest4 }, //MY thread test
+ 	{ "sy1",	semtest },
+ 
+ 	/* synchronization assignment tests */
+diff --git a/kern/proc/proc.c b/kern/proc/proc.c
+index 75547d0..4d2f9de 100644
+--- a/kern/proc/proc.c
++++ b/kern/proc/proc.c
+@@ -241,7 +241,7 @@ proc__exit(int status)
+         /* Now we can destroy the process. */
+         proc_destroy(proc);
+ 
+-        thread_exit();
++        thread_exit(0);
+ }
+ 
+ /*
+diff --git a/kern/test/synchtest.c b/kern/test/synchtest.c
+index c5582e2..f700566 100644
+--- a/kern/test/synchtest.c
++++ b/kern/test/synchtest.c
+@@ -146,7 +146,7 @@ fail(unsigned long num, const char *msg)
+ 	lock_release(testlock);
+ 
+ 	V(donesem);
+-	thread_exit();
++	thread_exit(0);
+ }
+ 
+ static
+@@ -247,7 +247,7 @@ cvtestthread(void *junk, unsigned long num)
+ 				kprintf("That's too fast... you must be "
+ 					"busy-looping\n");
+ 				V(donesem);
+-				thread_exit();
++				thread_exit(0);
+ 			}
+ 
+ 		}
+diff --git a/kern/test/threadtest.c b/kern/test/threadtest.c
+index be9f282..ed1d966 100644
+--- a/kern/test/threadtest.c
++++ b/kern/test/threadtest.c
+@@ -144,3 +144,48 @@ threadtest2(int nargs, char **args)
+ 
+ 	return 0;
+ }
++
++/*
++ * The idea of this test is to test thread_join() and see if it works properly.
++ * The test will fork threads and then rejoin them using the proper thread
++ * functions to do those two tasks.
++ * call_me is called to help with the arguments of the test
++*/
++
++static int call_me(void* p, unsigned long n){
++
++	(void)p; //I don't think I need this anymore but I'm gonna keep it here
++		// just in case I do.
++	kprintf("Currently in thread %ld\n", n);
++
++	return 100 + n;
++}
++
++int threadtest4(int nargs, char **args){
++
++	(void) nargs;
++	(void) args;
++
++	kprintf("Thread test 4:\n");
++
++	struct thread *forks[NTHREADS];
++	int err;
++	int rturn;
++
++	for(int i = 0; i < NTHREADS; i++)
++		my_thread_fork("child", &(forks[i]), NULL, &call_me, NULL, i);
++	
++	//Error now included!
++	for(int i = 0; i <NTHREADS; i++){
++		err = thread_join(forks[i], &rturn); //should be zero
++		//printf("Thread Number %d returned value %d!\n", i, rturn);
++		kprintf("Thread Number %d returned value %d!\n", i, rturn);
++	}
++
++	kprintf("Original thread finished!\n");
++	kprintf("Final value of err: %d\n", err);
++	kprintf("Thread test 4 completed\n");
++
++
++	return 0;
++}
+diff --git a/kern/thread/synch.c b/kern/thread/synch.c
+index d083f4b..8b13d6e 100644
+--- a/kern/thread/synch.c
++++ b/kern/thread/synch.c
+@@ -40,6 +40,16 @@
+ #include <current.h>
+ #include <synch.h>
+ 
++//Added wchan functions for calling spinlock
++//Edit: MOVED!
++/*void wchan_lock(struct wchan *wch){
++	spinlock_acquire(&wch->wc_lock);
++}
++
++void wchan_unlock(struct wchan *wch){
++	spinlock_release(&wc->wc_lock);
++}*/
++
+ ////////////////////////////////////////////////////////////
+ //
+ // Semaphore.
+@@ -154,9 +164,51 @@ lock_create(const char *name)
+                 return NULL;
+         }
+ 
++	/* Massive change here:
++	 * Kernel was panicking so I changed things
++	 * Also made names more clear with thsi new implementation
++	 */
+         // add stuff here as needed
+ 
+-        return lock;
++	/*//wait channel
++	lock->l_wch = wchan_create(lock->lk_name);
++
++	//check if null
++	if(lock->l_wch == NULL){
++
++		//modify the lock name *char first
++		kfree(lock->lk_name);
++
++		//then the lock
++		kfree(lock);
++
++		return NULL;
++	}
++
++	//initialize the spinlock 		//note:
++	//spinlock_init(lock->splock); 		//spinlock_init needs &lock!
++	//spinlock_init(*lock->splock);
++	spinlock_init(&lock->splock);
++        
++	//No thread owning this lock
++	lock->th_holder = NULL;
++
++	//Set locked value
++	lock->locked = 1;
++
++	//Everything initialized!
++	*/
++
++	//Create wait channel and set lock to not busy
++	lock->lk_wchan = wchan_create(name);
++	lock->lk_busy = false;
++
++	//create spinlock
++	spinlock_init(&lock->lk_spinlock);
++
++	//All initialized!
++
++	return lock;
+ }
+ 
+ void
+@@ -166,8 +218,21 @@ lock_destroy(struct lock *lock)
+ 
+         // add stuff here as needed
+ 
++	//remove wait channel
++	/*wchan_destroy(lock->l_wch);
++
++	//remove spinlock
++	//spinlock_release(lock->splock);
++	spinlock_cleanup(&lock->splock);
++	*/
++
++	//Much cleaner and easily understood variables
++	//Old method commented for reference
+         kfree(lock->lk_name);
+-        kfree(lock);
++        wchan_destroy(lock->lk_wchan);
++	spinlock_cleanup(&lock->lk_spinlock);
++	kfree(lock);
++
+ }
+ 
+ void
+@@ -175,7 +240,56 @@ lock_acquire(struct lock *lock)
+ {
+         // Write this
+ 
+-        (void)lock;  // suppress warning until code gets written
++	//OLD
++	/*
++        //(void)lock;  // suppress warning until code gets written
++
++	//important:
++	KASSERT(lock != NULL); 		//call into lib.h code
++
++	//code from current.h - check machine dependent variance
++	if(CURCPU_EXISTS())
++		KASSERT(lock->th_holder != curthread);
++
++
++	spinlock_acquire(&lock->splock);
++
++	while(lock->locked == 0){
++		
++		wchan_lock(lock->l_wch);
++
++		//spinlock_release(lock->splock);
++		spinlock_release(&lock->splock);
++
++		wchan_sleep(lock->l_wch,&lock->splock);
++		spinlock_acquire(&lock->splock);
++		//wchan_wakeone(lock->l_wch);
++	}
++
++	//KASSERT(lock->locked == 0);
++	KASSERT(lock->locked > 0);
++
++	//NOW make it zero
++	lock->locked = 0;
++
++	//depending on which is less expensive:
++	if(CURCPU_EXISTS())
++		lock->th_holder = curthread; //the current thread is using this lock
++	else
++		lock->th_holder = NULL; 	//Nobody owns this lock
++
++	spinlock_release(&lock->splock);
++	*/
++
++	spinlock_acquire(&lock->lk_spinlock);
++	while(lock->lk_busy)
++		wchan_sleep(lock->lk_wchan, &lock->lk_spinlock);
++
++	lock->lk_busy = true;
++	lock->lk_thread = curthread;
++
++	spinlock_release(&lock->lk_spinlock);
++
+ }
+ 
+ void
+@@ -183,7 +297,42 @@ lock_release(struct lock *lock)
+ {
+         // Write this
+ 
+-        (void)lock;  // suppress warning until code gets written
++        //(void)lock;  // suppress warning until code gets written
++
++	//OLD - kept for reference
++	/*
++	KASSERT(lock != NULL);
++	spinlock_acquire(&lock->splock); 	//Actually release the lock
++
++	//Just like in lock_acquire
++	if(CURCPU_EXISTS())
++		KASSERT(lock->th_holder == curthread); 		//Current thread holds lock?
++	//no thread holder now
++	lock->th_holder = NULL;
++
++	//locked is now > 0
++	lock->locked++;
++	
++	//KASSERT(lock->locked == 0);
++	KASSERT(lock->locked > 0);
++
++	//wchan_wakeone(lock->splock);
++	wchan_wakeone(lock->l_wch, &lock->splock);
++	spinlock_release(&lock->splock);
++	*/
++
++	spinlock_acquire(&lock->lk_spinlock);
++
++	//KASSERT section
++	KASSERT(lock->lk_thread == curthread); 	//This gave me so much trouble
++	KASSERT(lock->lk_busy);
++
++	lock->lk_busy = false;
++	lock->lk_thread = NULL;
++
++	wchan_wakeone(lock->lk_wchan, &lock->lk_spinlock);
++	spinlock_release(&lock->lk_spinlock);
++
+ }
+ 
+ bool
+@@ -191,9 +340,14 @@ lock_do_i_hold(struct lock *lock)
+ {
+         // Write this
+ 
+-        (void)lock;  // suppress warning until code gets written
++        /*(void)lock;  // suppress warning until code gets written
+ 
+         return true; // dummy until code gets written
++	*/
++
++	//easier
++	return lock->lk_thread == curthread;
++
+ }
+ 
+ ////////////////////////////////////////////////////////////
+@@ -219,6 +373,17 @@ cv_create(const char *name)
+ 
+         // add stuff here as needed
+ 
++	//Need to add support for the conditional variable wait channel I made:
++	cv->cv_wchan = wchan_create(cv->cv_name);
++
++	//is wait channel we just created null?
++	if(cv->cv_wchan == NULL){
++		//we don't need to return the null cv if it's null.
++		kfree(cv->cv_name);
++		kfree(cv);
++		return NULL;
++	}
++
+         return cv;
+ }
+ 
+@@ -229,6 +394,11 @@ cv_destroy(struct cv *cv)
+ 
+         // add stuff here as needed
+ 
++	//All we need to add is a line to delete the wait channel of the cv
++	//that I added
++	spinlock_cleanup(&cv->cv_lock);
++	wchan_destroy(cv->cv_wchan);
++
+         kfree(cv->cv_name);
+         kfree(cv);
+ }
+@@ -237,22 +407,80 @@ void
+ cv_wait(struct cv *cv, struct lock *lock)
+ {
+         // Write this
+-        (void)cv;    // suppress warning until code gets written
+-        (void)lock;  // suppress warning until code gets written
++        //(void)cv;    // suppress warning until code gets written
++        //(void)lock;  // suppress warning until code gets written
++
++	//KASSERT(cv == NULL);  		//TEST
++	//KASSERT(lock == NULL); 		//TEST
++	//KEPT
++	KASSERT(cv != NULL);
++	KASSERT(lock != NULL);
++	//newish:
++	KASSERT(curthread->t_in_interrupt == false);
++	KASSERT(lock_do_i_hold(lock));
++
++	spinlock_acquire(&cv->cv_lock);
++	lock_release(lock);
++	
++	//NOW it should give the opposite
++	KASSERT(!lock_do_i_hold(lock));
++	wchan_sleep(cv->cv_wchan, &cv->cv_lock);
++
++	spinlock_release(&cv->cv_lock);
++	lock_acquire(lock);
++	KASSERT(lock_do_i_hold(lock));
++
++	//OLD
++	/*wchan_lock(cv->cv_wch);
++	//unlock
++	lock_release(lock);
++	wchan_sleep(cv->cv_wch, &lock->splock);
++	//relock
++	lock_acquire(lock);
++	*/
+ }
+ 
+ void
+ cv_signal(struct cv *cv, struct lock *lock)
+ {
+         // Write this
+-	(void)cv;    // suppress warning until code gets written
+-	(void)lock;  // suppress warning until code gets written
++	//(void)cv;    // suppress warning until code gets written
++	//(void)lock;  // suppress warning until code gets written
++
++	//kept
++	KASSERT(cv != NULL);
++	KASSERT(lock != NULL);
++
++	KASSERT(lock_do_i_hold(lock)); 		//Well, do we?
++	//Signal one in the wait channel
++	wchan_wakeone(cv->cv_wchan,&lock->lk_spinlock);
++
++	//IMPORTANT - almost forgot
++	spinlock_release(&cv->cv_lock);
++
+ }
+ 
++
++//Identical to cv_signal, except signals ALL
+ void
+ cv_broadcast(struct cv *cv, struct lock *lock)
+ {
+ 	// Write this
+-	(void)cv;    // suppress warning until code gets written
+-	(void)lock;  // suppress warning until code gets written
++	//(void)cv;    // suppress warning until code gets written
++	//(void)lock;  // suppress warning until code gets written
++
++	KASSERT(cv != NULL);
++	KASSERT(lock != NULL);
++
++	KASSERT(lock_do_i_hold(lock)); 		//Well, do we?
++	
++	//important:
++	spinlock_acquire(&cv->cv_lock);
++	
++	//Signal one in the wait channel
++	wchan_wakeall(cv->cv_wchan, &lock->lk_spinlock);
++
++	//important
++	spinlock_release(&cv->cv_lock);
++
+ }
+diff --git a/kern/thread/thread.c b/kern/thread/thread.c
+index 8ac3b9d..befe2c4 100644
+--- a/kern/thread/thread.c
++++ b/kern/thread/thread.c
+@@ -32,6 +32,9 @@
+  */
+ 
+ #define THREADINLINE
++#define BOOTUP_PID 1 	//used once
++#define INVALID_PID 0
++#define PROCS_MAX 128 	//Maximum processes
+ 
+ #include <types.h>
+ #include <kern/errno.h>
+@@ -50,7 +53,32 @@
+ #include <addrspace.h>
+ #include <mainbus.h>
+ #include <vnode.h>
++#include <kern/wait.h>
+ 
++#include "opt-synchprobs.h"
++
++//No longer used
++/*struct pidinfo{
++	//pid
++	pid_t pid;
++	//parent pid
++	pid_t ppid;
++
++	//exit status
++	int exitstat;
++	//conditional value
++	struct cv *cv_pid;
++
++	//volatile members
++	volatile bool exited;
++	volatile int signal;
++};*/
++
++
++//static struct pidinfo *pidinfo[PROCS_MAX];
++//static struct lock *pidlock;
++//static pid_t nextpid;
++//static int nprocs;
+ 
+ /* Magic number used as a guard value on kernel thread stacks. */
+ #define THREAD_STACK_MAGIC 0xbaadf00d
+@@ -59,6 +87,9 @@
+ struct wchan {
+ 	const char *wc_name;		/* name for this channel */
+ 	struct threadlist wc_threads;	/* list of waiting threads */
++	
++	//Added a lock (spinlock) to the wait channel for use down below
++	struct spinlock wc_lock;
+ };
+ 
+ /* Master array of CPUs. */
+@@ -150,6 +181,11 @@ thread_create(const char *name)
+ 	thread->t_did_reserve_buffers = false;
+ 
+ 	/* If you add to struct thread, be sure to initialize here */
++	thread->th_parent = NULL;
++	thread->has_parent = false;
++	thread->childs = 0;
++	thread->semchild = NULL;
++	thread->semparent = NULL;
+ 
+ 	return thread;
+ }
+@@ -420,7 +456,7 @@ cpu_hatch(unsigned software_number)
+ 	kprintf("cpu%u: %s\n", software_number, buf);
+ 
+ 	V(cpu_startup_sem);
+-	thread_exit();
++	thread_exit(0);
+ }
+ 
+ /*
+@@ -494,6 +530,7 @@ thread_make_runnable(struct thread *target, bool already_have_lock)
+  * process is inherited from the caller. It will start on the same CPU
+  * as the caller, unless the scheduler intervenes first.
+  */
++
+ int
+ thread_fork(const char *name,
+ 	    struct proc *proc,
+@@ -550,6 +587,93 @@ thread_fork(const char *name,
+ 	return 0;
+ }
+ 
++/* 	My own modified version of the above
++	I wanted to keep the original so as not to
++	bother other areas of the OS and save some hassle
++*/
++int
++my_thread_fork(const char *name,
++	    struct thread **thread_out,
++	    struct proc *proc,
++	   int (*entrypoint)(void *data1, unsigned long data2),
++	    void *data1, unsigned long data2)
++{
++	struct thread *newthread;
++	int result;
++
++	newthread = thread_create(name);
++	if (newthread == NULL) {
++		return ENOMEM;
++	}
++
++	/* Allocate a stack */
++	newthread->t_stack = kmalloc(STACK_SIZE);
++	if (newthread->t_stack == NULL) {
++		thread_destroy(newthread);
++		return ENOMEM;
++	}
++	thread_checkstack_init(newthread);
++
++	/*
++	 * Now we clone various fields from the parent thread.
++	 */
++
++	/* Thread subsystem fields */
++	newthread->t_cpu = curthread->t_cpu;
++
++	//The difference between this and the original lies here
++	//handling my own data
++	if(thread_out != NULL){
++		*thread_out = newthread;
++		curthread->childs++; 	//increase counter
++		newthread->th_parent = curthread; 	//parent is current one
++		newthread->has_parent = true; 		//It has a parent
++		newthread->semparent = sem_create(name, 0);
++
++		if(newthread->semparent == NULL){
++			//Creating semaphore failed, abort
++			thread_destroy(newthread);
++			return -1;
++		}
++
++		newthread->semchild = sem_create(name, 0);
++		
++		if(newthread->semchild == NULL){
++			thread_destroy(newthread);
++			sem_destroy(newthread->semparent);
++			return -1;
++		}
++	}
++
++
++	/* Attach the new thread to its process */
++	if (proc == NULL) {
++		proc = curthread->t_proc;
++	}
++	result = proc_addthread(proc, newthread);
++	if (result) {
++		/* thread_destroy will clean up the stack */
++		thread_destroy(newthread);
++		return result;
++	}
++
++	/*
++	 * Because new threads come out holding the cpu runqueue lock
++	 * (see notes at bottom of thread_switch), we need to account
++	 * for the spllower() that will be done releasing it.
++	 */
++	newthread->t_iplhigh_count++;
++
++	/* Set up the switchframe so entrypoint() gets called */
++	/* THIS PART HAS ALSO CHANGED - reroutes to my version */
++	my_switchframe_init(newthread, entrypoint, data1, data2);
++
++	/* Lock the current cpu's run queue and make the new thread runnable */
++	thread_make_runnable(newthread, false);
++
++	return 0;
++}
++
+ /*
+  * High level, machine-independent context switch code.
+  *
+@@ -766,7 +890,7 @@ thread_startup(void (*entrypoint)(void *data1, unsigned long data2),
+ 	entrypoint(data1, data2);
+ 
+ 	/* Done. */
+-	thread_exit();
++	thread_exit(0);
+ }
+ 
+ /*
+@@ -779,19 +903,29 @@ thread_startup(void (*entrypoint)(void *data1, unsigned long data2),
+  * Does not return.
+  */
+ void
+-thread_exit(void)
++thread_exit(int ret)
+ {
+ 	struct thread *cur;
+ 
+ 	cur = curthread;
+ 
+-	KASSERT(cur->t_did_reserve_buffers == false);
++	//KASSERT(cur->t_did_reserve_buffers == false);
++
++	cur->th_return = ret;
++
++	if(cur->has_parent){
++		V(cur->semchild);
++		P(cur->semparent);
++		sem_destroy(cur->semparent);
++		sem_destroy(cur->semchild);
++	}
+ 
+ 	/*
+ 	 * Detach from our process. You might need to move this action
+ 	 * around, depending on how your wait/exit works.
+ 	 */
+-	proc_remthread(cur);
++	if(cur->t_proc != NULL)
++		proc_remthread(cur);
+ 
+ 	/* Make sure we *are* detached (move this only if you're sure!) */
+ 	KASSERT(cur->t_proc == NULL);
+@@ -805,6 +939,100 @@ thread_exit(void)
+ 	panic("braaaaaaaiiiiiiiiiiinssssss\n");
+ }
+ 
++//gets process info
++//UPDATE: No longer used.
++/*static struct pidinfo * pi_get(pid_t pid){
++
++	struct pidinfo *pi;
++	KASSERT(pid>=0);
++	KASSERT(pid != INVALID_PID);
++	KASSERT(lock_do_i_hold(pidlock));
++
++	pi = pidinfo[pid % PROCS_MAX];
++	if(pi == NULL)
++		return NULL;
++
++	if(pi->pid != pid)
++		return NULL;
++
++	return pi;
++};*/
++
++//My implementation of thread_join()
++//UPDATE - changed the entire thing due to understanding funcs better
++//Overall better
++//int thread_join(pid_t childpid, int *status, int options){
++int thread_join(struct thread *thread, int *ret){
++
++	struct thread *current;
++	struct thread *t_parent;
++
++	t_parent = thread->th_parent;
++
++	//KASSERT section
++	KASSERT(thread != NULL);
++	KASSERT(t_parent != NULL);
++
++	current = curthread;
++
++	//More KASSERT
++	KASSERT(thread != current);
++	KASSERT(thread->semchild != NULL);
++	KASSERT(thread->semparent != NULL);
++
++	//get return value
++	*ret = thread->th_return;
++
++	//finish
++	current->childs--;
++	//if (current->childs < 0)
++	//	current->childs = 0;
++	thread->th_parent = NULL;
++	V(thread->semparent);
++	
++	/* OLD
++	//check if options are valid. use kern/errno.h for values
++	if(options != 0 && options != WNOHANG)
++		return -EINVAL; 	//Built-in error numbers used here
++
++	struct pidinfo *me;
++	struct pidinfo *child;
++	lock_acquire(pidlock);
++	me = pi_get(curthread->t_pid);
++
++	KASSERT(me != NULL);
++	KASSERT(me->exited == false);
++
++	child = pi_get(childpid);
++
++	//if the child PID doesn't exist
++	if(child == NULL){
++		lock_release(pidlock);
++		return -ECHILD;
++	}
++
++	if(child->ppid != me->pid || child->ppid == INVALID_PID){
++		lock_release(pidlock);
++		return -ECHILD;
++	}
++
++	//if running still
++	if(options != WNOHANG && child->exited == false){
++		cv_wait(child->cv_pid, pidlock);
++		KASSERT(child->exited == true);
++	}
++
++	if(options == WNOHANG && child->exited == false)
++		*status = 0;
++	else
++		*status = child->exitstat;
++
++	//Done with this now
++	lock_release(pidlock);
++	*/
++	return 0;
++}
++
+ /*
+  * Yield the cpu to another process, but stay runnable.
+  */
+@@ -972,11 +1200,14 @@ struct wchan *
+ wchan_create(const char *name)
+ {
+ 	struct wchan *wc;
+-
++	
+ 	wc = kmalloc(sizeof(*wc));
+ 	if (wc == NULL) {
+ 		return NULL;
+ 	}
++
++	//Added this here
++	spinlock_init(&wc->wc_lock);
+ 	threadlist_init(&wc->wc_threads);
+ 	wc->wc_name = name;
+ 
+@@ -990,10 +1221,22 @@ wchan_create(const char *name)
+ void
+ wchan_destroy(struct wchan *wc)
+ {
++	//clean up spinlock as well:
++	spinlock_cleanup(&wc->wc_lock);
++
+ 	threadlist_cleanup(&wc->wc_threads);
+ 	kfree(wc);
+ }
+ 
++//Originally had these elsewhere, work better here:
++void wchan_lock(struct wchan *wc){
++	spinlock_acquire(&wc->wc_lock);
++}
++
++void wchan_unlock(struct wchan *wc){
++	spinlock_release(&wc->wc_lock);
++}
++
+ /*
+  * Yield the cpu to another process, and go to sleep, on the specified
+  * wait channel WC, whose associated spinlock is LK. Calling wakeup on
+@@ -1002,7 +1245,7 @@ wchan_destroy(struct wchan *wc)
+  * before returning.
+  */
+ void
+-wchan_sleep(struct wchan *wc, struct spinlock *lk)
++wchan_sleep(struct wchan *wc, struct spinlock *lk) 		//why pass the lock? is it necessary? What if I don't desire to pass in the lock every time?
+ {
+ 	/* may not sleep in an interrupt handler */
+ 	KASSERT(!curthread->t_in_interrupt);
+@@ -1026,10 +1269,14 @@ wchan_wakeone(struct wchan *wc, struct spinlock *lk)
+ 	struct thread *target;
+ 
+ 	KASSERT(spinlock_do_i_hold(lk));
++	spinlock_acquire(&wc->wc_lock);
+ 
+ 	/* Grab a thread from the channel */
+ 	target = threadlist_remhead(&wc->wc_threads);
+ 
++	//release
++	spinlock_release(&wc->wc_lock);
++
+ 	if (target == NULL) {
+ 		/* Nobody was sleeping. */
+ 		return;
+@@ -1067,6 +1314,9 @@ wchan_wakeall(struct wchan *wc, struct spinlock *lk)
+ 		threadlist_addtail(&list, target);
+ 	}
+ 
++	//release
++	spinlock_release(&wc->wc_lock);
++
+ 	/*
+ 	 * We could conceivably sort by cpu first to cause fewer lock
+ 	 * ops and fewer IPIs, but for now at least don't bother. Just
+@@ -1088,9 +1338,15 @@ wchan_isempty(struct wchan *wc, struct spinlock *lk)
+ {
+ 	bool ret;
+ 
++	//acquire lock
++	spinlock_acquire(&wc->wc_lock);
++
+ 	KASSERT(spinlock_do_i_hold(lk));
+ 	ret = threadlist_isempty(&wc->wc_threads);
+ 
++	//release it
++	spinlock_release(&wc->wc_lock);
++
+ 	return ret;
+ }
+ 

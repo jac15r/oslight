@@ -144,3 +144,48 @@ threadtest2(int nargs, char **args)
 
 	return 0;
 }
+
+/*
+ * The idea of this test is to test thread_join() and see if it works properly.
+ * The test will fork threads and then rejoin them using the proper thread
+ * functions to do those two tasks.
+ * call_me is called to help with the arguments of the test
+*/
+
+static int call_me(void* p, unsigned long n){
+
+	(void)p; //I don't think I need this anymore but I'm gonna keep it here
+		// just in case I do.
+	kprintf("Currently in thread %ld\n", n);
+
+	return 100 + n;
+}
+
+int threadtest4(int nargs, char **args){
+
+	(void) nargs;
+	(void) args;
+
+	kprintf("Thread test 4:\n");
+
+	struct thread *forks[NTHREADS];
+	int err;
+	int rturn;
+
+	for(int i = 0; i < NTHREADS; i++)
+		my_thread_fork("child", &(forks[i]), NULL, &call_me, NULL, i);
+	
+	//Error now included!
+	for(int i = 0; i <NTHREADS; i++){
+		err = thread_join(forks[i], &rturn); //should be zero
+		//printf("Thread Number %d returned value %d!\n", i, rturn);
+		kprintf("Thread Number %d returned value %d!\n", i, rturn);
+	}
+
+	kprintf("Original thread finished!\n");
+	kprintf("Final value of err: %d\n", err);
+	kprintf("Thread test 4 completed\n");
+
+
+	return 0;
+}

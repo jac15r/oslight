@@ -32,6 +32,9 @@
  */
 
 #define THREADINLINE
+#define BOOTUP_PID 1 	//used once
+#define INVALID_PID 0
+#define PROCS_MAX 128 	//Maximum processes
 
 #include <types.h>
 #include <kern/errno.h>
@@ -50,7 +53,32 @@
 #include <addrspace.h>
 #include <mainbus.h>
 #include <vnode.h>
+#include <kern/wait.h>
 
+#include "opt-synchprobs.h"
+
+//No longer used
+/*struct pidinfo{
+	//pid
+	pid_t pid;
+	//parent pid
+	pid_t ppid;
+
+	//exit status
+	int exitstat;
+	//conditional value
+	struct cv *cv_pid;
+
+	//volatile members
+	volatile bool exited;
+	volatile int signal;
+};*/
+
+
+//static struct pidinfo *pidinfo[PROCS_MAX];
+//static struct lock *pidlock;
+//static pid_t nextpid;
+//static int nprocs;
 
 /* Magic number used as a guard value on kernel thread stacks. */
 #define THREAD_STACK_MAGIC 0xbaadf00d
@@ -59,6 +87,9 @@
 struct wchan {
 	const char *wc_name;		/* name for this channel */
 	struct threadlist wc_threads;	/* list of waiting threads */
+	
+	//Added a lock (spinlock) to the wait channel for use down below
+	struct spinlock wc_lock;
 };
 
 /* Master array of CPUs. */
@@ -150,6 +181,11 @@ thread_create(const char *name)
 	thread->t_did_reserve_buffers = false;
 
 	/* If you add to struct thread, be sure to initialize here */
+	thread->th_parent = NULL;
+	thread->has_parent = false;
+	thread->childs = 0;
+	thread->semchild = NULL;
+	thread->semparent = NULL;
 
 	return thread;
 }
@@ -420,7 +456,7 @@ cpu_hatch(unsigned software_number)
 	kprintf("cpu%u: %s\n", software_number, buf);
 
 	V(cpu_startup_sem);
-	thread_exit();
+	thread_exit(0);
 }
 
 /*
@@ -494,6 +530,7 @@ thread_make_runnable(struct thread *target, bool already_have_lock)
  * process is inherited from the caller. It will start on the same CPU
  * as the caller, unless the scheduler intervenes first.
  */
+
 int
 thread_fork(const char *name,
 	    struct proc *proc,
@@ -543,6 +580,93 @@ thread_fork(const char *name,
 
 	/* Set up the switchframe so entrypoint() gets called */
 	switchframe_init(newthread, entrypoint, data1, data2);
+
+	/* Lock the current cpu's run queue and make the new thread runnable */
+	thread_make_runnable(newthread, false);
+
+	return 0;
+}
+
+/* 	My own modified version of the above
+	I wanted to keep the original so as not to
+	bother other areas of the OS and save some hassle
+*/
+int
+my_thread_fork(const char *name,
+	    struct thread **thread_out,
+	    struct proc *proc,
+	   int (*entrypoint)(void *data1, unsigned long data2),
+	    void *data1, unsigned long data2)
+{
+	struct thread *newthread;
+	int result;
+
+	newthread = thread_create(name);
+	if (newthread == NULL) {
+		return ENOMEM;
+	}
+
+	/* Allocate a stack */
+	newthread->t_stack = kmalloc(STACK_SIZE);
+	if (newthread->t_stack == NULL) {
+		thread_destroy(newthread);
+		return ENOMEM;
+	}
+	thread_checkstack_init(newthread);
+
+	/*
+	 * Now we clone various fields from the parent thread.
+	 */
+
+	/* Thread subsystem fields */
+	newthread->t_cpu = curthread->t_cpu;
+
+	//The difference between this and the original lies here
+	//handling my own data
+	if(thread_out != NULL){
+		*thread_out = newthread;
+		curthread->childs++; 	//increase counter
+		newthread->th_parent = curthread; 	//parent is current one
+		newthread->has_parent = true; 		//It has a parent
+		newthread->semparent = sem_create(name, 0);
+
+		if(newthread->semparent == NULL){
+			//Creating semaphore failed, abort
+			thread_destroy(newthread);
+			return -1;
+		}
+
+		newthread->semchild = sem_create(name, 0);
+		
+		if(newthread->semchild == NULL){
+			thread_destroy(newthread);
+			sem_destroy(newthread->semparent);
+			return -1;
+		}
+	}
+
+
+	/* Attach the new thread to its process */
+	if (proc == NULL) {
+		proc = curthread->t_proc;
+	}
+	result = proc_addthread(proc, newthread);
+	if (result) {
+		/* thread_destroy will clean up the stack */
+		thread_destroy(newthread);
+		return result;
+	}
+
+	/*
+	 * Because new threads come out holding the cpu runqueue lock
+	 * (see notes at bottom of thread_switch), we need to account
+	 * for the spllower() that will be done releasing it.
+	 */
+	newthread->t_iplhigh_count++;
+
+	/* Set up the switchframe so entrypoint() gets called */
+	/* THIS PART HAS ALSO CHANGED - reroutes to my version */
+	my_switchframe_init(newthread, entrypoint, data1, data2);
 
 	/* Lock the current cpu's run queue and make the new thread runnable */
 	thread_make_runnable(newthread, false);
@@ -766,7 +890,7 @@ thread_startup(void (*entrypoint)(void *data1, unsigned long data2),
 	entrypoint(data1, data2);
 
 	/* Done. */
-	thread_exit();
+	thread_exit(0);
 }
 
 /*
@@ -779,19 +903,29 @@ thread_startup(void (*entrypoint)(void *data1, unsigned long data2),
  * Does not return.
  */
 void
-thread_exit(void)
+thread_exit(int ret)
 {
 	struct thread *cur;
 
 	cur = curthread;
 
-	KASSERT(cur->t_did_reserve_buffers == false);
+	//KASSERT(cur->t_did_reserve_buffers == false);
+
+	cur->th_return = ret;
+
+	if(cur->has_parent){
+		V(cur->semchild);
+		P(cur->semparent);
+		sem_destroy(cur->semparent);
+		sem_destroy(cur->semchild);
+	}
 
 	/*
 	 * Detach from our process. You might need to move this action
 	 * around, depending on how your wait/exit works.
 	 */
-	proc_remthread(cur);
+	if(cur->t_proc != NULL)
+		proc_remthread(cur);
 
 	/* Make sure we *are* detached (move this only if you're sure!) */
 	KASSERT(cur->t_proc == NULL);
@@ -803,6 +937,100 @@ thread_exit(void)
         splhigh();
 	thread_switch(S_ZOMBIE, NULL, NULL);
 	panic("braaaaaaaiiiiiiiiiiinssssss\n");
+}
+
+//gets process info
+//UPDATE: No longer used.
+/*static struct pidinfo * pi_get(pid_t pid){
+
+	struct pidinfo *pi;
+	KASSERT(pid>=0);
+	KASSERT(pid != INVALID_PID);
+	KASSERT(lock_do_i_hold(pidlock));
+
+	pi = pidinfo[pid % PROCS_MAX];
+	if(pi == NULL)
+		return NULL;
+
+	if(pi->pid != pid)
+		return NULL;
+
+	return pi;
+};*/
+
+//My implementation of thread_join()
+//UPDATE - changed the entire thing due to understanding funcs better
+//Overall better
+//int thread_join(pid_t childpid, int *status, int options){
+int thread_join(struct thread *thread, int *ret){
+
+	struct thread *current;
+	struct thread *t_parent;
+
+	t_parent = thread->th_parent;
+
+	//KASSERT section
+	KASSERT(thread != NULL);
+	KASSERT(t_parent != NULL);
+
+	current = curthread;
+
+	//More KASSERT
+	KASSERT(thread != current);
+	KASSERT(thread->semchild != NULL);
+	KASSERT(thread->semparent != NULL);
+
+	//get return value
+	*ret = thread->th_return;
+
+	//finish
+	current->childs--;
+	//if (current->childs < 0)
+	//	current->childs = 0;
+	thread->th_parent = NULL;
+	V(thread->semparent);
+	
+	/* OLD
+	//check if options are valid. use kern/errno.h for values
+	if(options != 0 && options != WNOHANG)
+		return -EINVAL; 	//Built-in error numbers used here
+
+	struct pidinfo *me;
+	struct pidinfo *child;
+	lock_acquire(pidlock);
+	me = pi_get(curthread->t_pid);
+
+	KASSERT(me != NULL);
+	KASSERT(me->exited == false);
+
+	child = pi_get(childpid);
+
+	//if the child PID doesn't exist
+	if(child == NULL){
+		lock_release(pidlock);
+		return -ECHILD;
+	}
+
+	if(child->ppid != me->pid || child->ppid == INVALID_PID){
+		lock_release(pidlock);
+		return -ECHILD;
+	}
+
+	//if running still
+	if(options != WNOHANG && child->exited == false){
+		cv_wait(child->cv_pid, pidlock);
+		KASSERT(child->exited == true);
+	}
+
+	if(options == WNOHANG && child->exited == false)
+		*status = 0;
+	else
+		*status = child->exitstat;
+
+	//Done with this now
+	lock_release(pidlock);
+	*/
+	return 0;
 }
 
 /*
@@ -972,11 +1200,14 @@ struct wchan *
 wchan_create(const char *name)
 {
 	struct wchan *wc;
-
+	
 	wc = kmalloc(sizeof(*wc));
 	if (wc == NULL) {
 		return NULL;
 	}
+
+	//Added this here
+	spinlock_init(&wc->wc_lock);
 	threadlist_init(&wc->wc_threads);
 	wc->wc_name = name;
 
@@ -990,8 +1221,20 @@ wchan_create(const char *name)
 void
 wchan_destroy(struct wchan *wc)
 {
+	//clean up spinlock as well:
+	spinlock_cleanup(&wc->wc_lock);
+
 	threadlist_cleanup(&wc->wc_threads);
 	kfree(wc);
+}
+
+//Originally had these elsewhere, work better here:
+void wchan_lock(struct wchan *wc){
+	spinlock_acquire(&wc->wc_lock);
+}
+
+void wchan_unlock(struct wchan *wc){
+	spinlock_release(&wc->wc_lock);
 }
 
 /*
@@ -1002,7 +1245,7 @@ wchan_destroy(struct wchan *wc)
  * before returning.
  */
 void
-wchan_sleep(struct wchan *wc, struct spinlock *lk)
+wchan_sleep(struct wchan *wc, struct spinlock *lk) 		//why pass the lock? is it necessary? What if I don't desire to pass in the lock every time?
 {
 	/* may not sleep in an interrupt handler */
 	KASSERT(!curthread->t_in_interrupt);
@@ -1026,9 +1269,13 @@ wchan_wakeone(struct wchan *wc, struct spinlock *lk)
 	struct thread *target;
 
 	KASSERT(spinlock_do_i_hold(lk));
+	spinlock_acquire(&wc->wc_lock);
 
 	/* Grab a thread from the channel */
 	target = threadlist_remhead(&wc->wc_threads);
+
+	//release
+	spinlock_release(&wc->wc_lock);
 
 	if (target == NULL) {
 		/* Nobody was sleeping. */
@@ -1067,6 +1314,9 @@ wchan_wakeall(struct wchan *wc, struct spinlock *lk)
 		threadlist_addtail(&list, target);
 	}
 
+	//release
+	spinlock_release(&wc->wc_lock);
+
 	/*
 	 * We could conceivably sort by cpu first to cause fewer lock
 	 * ops and fewer IPIs, but for now at least don't bother. Just
@@ -1088,8 +1338,14 @@ wchan_isempty(struct wchan *wc, struct spinlock *lk)
 {
 	bool ret;
 
+	//acquire lock
+	spinlock_acquire(&wc->wc_lock);
+
 	KASSERT(spinlock_do_i_hold(lk));
 	ret = threadlist_isempty(&wc->wc_threads);
+
+	//release it
+	spinlock_release(&wc->wc_lock);
 
 	return ret;
 }

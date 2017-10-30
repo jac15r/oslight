@@ -34,7 +34,6 @@
  * Wait channel.
  */
 
-
 struct spinlock; /* in spinlock.h */
 struct wchan; /* Opaque */
 
@@ -55,6 +54,10 @@ void wchan_destroy(struct wchan *wc);
  * This is meant to be used only for diagnostic purposes.
  */
 bool wchan_isempty(struct wchan *wc, struct spinlock *lk);
+
+//ADDED FUNCTION PROTOTYPES! (Currently defined within thread.c with others)
+void wchan_lock(struct wchan *wch);
+void wchan_unlock(struct wchan *wch);
 
 /*
  * Go to sleep on a wait channel. The current thread is suspended

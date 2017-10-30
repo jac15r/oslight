@@ -217,7 +217,7 @@ void
 sys__exit(int status)
 {
         proc__exit(_MKWAIT_EXIT(status));
-        thread_exit();
+        thread_exit(0);
 }
 
 

@@ -109,6 +109,18 @@ struct thread {
 	bool t_did_reserve_buffers;	/* reserve_buffers() in effect */
 
 	/* add more here as needed */
+
+	//Old idea - dont want to use anymore
+	//pid_t t_pid; 			//the pid of the thread
+
+	//NEW VALUES
+	struct semaphore *semchild;
+	struct semaphore *semparent;
+	struct thread *th_parent;
+	int childs;
+	bool has_parent;
+	int th_return;
+
 };
 
 /*
@@ -143,15 +155,27 @@ void thread_shutdown(void);
  * general safe to refer to it as the new thread may exit and
  * disappear at any time without notice.
  */
+
 int thread_fork(const char *name, struct proc *proc,
                 void (*func)(void *, unsigned long),
                 void *data1, unsigned long data2);
+//Or...my own version that uses threads and my function
+int my_thread_fork(const char *name, struct thread **thread_out,
+		struct proc *proc, int (*func)(void *, unsigned long),
+		void *data1, unsigned long data2);
 
 /*
  * Cause the current thread to exit.
  * Interrupts need not be disabled.
  */
-__DEAD void thread_exit(void);
+void thread_exit(int ret);
+
+//Stuff I added
+
+//static struct pidinfo * pi_get(pid_t pid);
+//int thread_join(pid_t childpid, int *status, int options);
+int thread_join(struct thread *thread, int *ret);
+
 
 /*
  * Cause the current thread to yield to the next runnable thread, but

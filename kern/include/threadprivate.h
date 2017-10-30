@@ -74,5 +74,8 @@ void switchframe_init(struct thread *,
 		      void (*entrypoint)(void *data1, unsigned long data2),
 		      void *data1, unsigned long data2);
 
+void my_switchframe_init(struct thread *,
+			int (*entrypoint)(void *data1, unsigned long data2),
+			void *data1, unsigned long data2);
 
 #endif /* _THREADPRIVATE_H_ */

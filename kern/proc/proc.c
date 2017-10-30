@@ -241,7 +241,7 @@ proc__exit(int status)
         /* Now we can destroy the process. */
         proc_destroy(proc);
 
-        thread_exit();
+        thread_exit(0);
 }
 
 /*
